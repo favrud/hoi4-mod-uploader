@@ -297,7 +297,7 @@ class HOI4ModUploaderApp:
     def __init__(self, root: tk.Tk, dpi_scale: float = 1.0):
         self.root = root
         self.dpi = max(1.0, float(dpi_scale))
-        root.title("HOI4 Mod 创意工坊上传工具  v2.0")
+        root.title("HOI4 Mod 创意工坊上传工具  v2.1")
         root.minsize(980, 660)
 
         self.T = THEMES["dark"]   # 当前主题色板（load_config 后确定）
@@ -317,6 +317,10 @@ class HOI4ModUploaderApp:
         self._log_fh = None
         self._thumb_img = None
         self._last_info = {"name": "", "version": "", "supported_version": "", "tags": []}
+        # 当前 Mod 目录归属跟踪：预览图 / 描述在切换 Mod 时随之切换
+        self._cur_dir_key = ""
+        self._preview_for = ""
+        self._desc_cache = {}
 
         self._make_vars()
         self.load_config()
@@ -344,6 +348,7 @@ class HOI4ModUploaderApp:
 
         self._detect_steamcmd()
         self._refresh_history()
+        self._scan_local_mods()
         self._update_link_buttons()
         if self.mod_dir.get().strip():
             try:
@@ -802,7 +807,7 @@ class HOI4ModUploaderApp:
         side.pack(side="left", fill="y")
 
         ttk.Label(side, text="HOI4 Mod 上传工具", style="Title.TLabel").pack(anchor="w")
-        ttk.Label(side, text="创意工坊 · SteamCMD 直传  v2.0",
+        ttk.Label(side, text="创意工坊 · SteamCMD 直传  v2.1",
                   style="SideDim.TLabel").pack(anchor="w", pady=(0, self.px(8)))
         ttk.Separator(side).pack(fill="x", pady=(0, self.px(8)))
 
@@ -824,6 +829,22 @@ class HOI4ModUploaderApp:
         ttk.Button(btns, text="移除记录", style="Ghost.TButton",
                    command=self._remove_history).pack(side="left", fill="x", expand=True,
                                                       padx=(self.px(6), 0))
+
+        ttk.Separator(side).pack(fill="x", pady=self.px(8))
+
+        head2 = ttk.Frame(side, style="Side.TFrame")
+        head2.pack(fill="x")
+        ttk.Label(head2, text="本地 Mod", style="Side.TLabel",
+                  font=self.F_H).pack(side="left")
+        ttk.Button(head2, text="刷新", style="Ghost.TButton", width=5,
+                   command=self._scan_local_mods).pack(side="right")
+        ttk.Label(side, text="HOI4 mod 目录扫描 · 单击载入",
+                  style="SideDim.TLabel").pack(anchor="w", pady=(0, self.px(4)))
+        self.local_tree = ttk.Treeview(side, style="History.Treeview",
+                                       show="tree", selectmode="browse")
+        self.local_tree.column("#0", stretch=True)
+        self.local_tree.pack(fill="both", expand=True)
+        self.local_tree.bind("<<TreeviewSelect>>", self._on_local_select)
 
         ttk.Separator(side).pack(fill="x", pady=self.px(10))
 
@@ -968,7 +989,9 @@ class HOI4ModUploaderApp:
                   font=self.F_BODY).grid(row=0, column=0, sticky="ew")
         ttk.Button(row, text="选择...", command=self._browse_preview).grid(
             row=0, column=1, padx=(self.px(6), 0))
-        ttk.Button(row, text="清除", command=lambda: self.preview_path.set("")).grid(
+        ttk.Button(row, text="清除",
+                   command=lambda: (self.preview_path.set(""),
+                                    setattr(self, "_preview_for", ""))).grid(
             row=0, column=2, padx=(self.px(6), 0))
 
         # 可见性 + 更新说明
@@ -1045,6 +1068,7 @@ class HOI4ModUploaderApp:
             filetypes=[("图片", "*.png *.jpg *.jpeg *.gif"), ("所有文件", "*.*")])
         if f:
             self.preview_path.set(f)
+            self._preview_for = self.mod_dir.get().strip()   # 手动选择的图归属当前 Mod
 
     def _open_preview_file(self, e=None):
         p = self.preview_path.get().strip()
@@ -1072,8 +1096,23 @@ class HOI4ModUploaderApp:
         self._log(f"[解析] {d}")
         self._log(f"[解析] 名称={info['name']} 版本={info['version']} 标签={info['tags']}", "dim")
 
-        # 自动找预览图
-        if not self.preview_path.get():
+        cur_key = path_key(d)
+        if cur_key != self._cur_dir_key:
+            # 切换了 Mod：暂存上一个 Mod 的描述，换上这一个的（避免描述串台）
+            if self._cur_dir_key:
+                self._desc_cache[self._cur_dir_key] = \
+                    self.desc_text.get("1.0", "end").rstrip("\n")
+            self.desc_text.delete("1.0", "end")
+            cached = self._desc_cache.get(cur_key, "")
+            if cached:
+                self.desc_text.insert("1.0", cached)
+            self._cur_dir_key = cur_key
+
+        # 自动匹配预览图：只要预览图不属于当前 Mod 目录，就重新找
+        # （同一 Mod 内手动选择的图不会被覆盖；点「清除」后会重新自动匹配）
+        if path_key(self._preview_for) != cur_key:
+            self._preview_for = d
+            self.preview_path.set("")
             for fname in ("thumbnail.png", "thumbnail.jpg", "preview.png", "preview.jpg"):
                 p = os.path.join(d, fname)
                 if os.path.isfile(p):
@@ -1082,6 +1121,9 @@ class HOI4ModUploaderApp:
 
         # 加载该 Mod 对应的已发布 ID
         self._load_pid(d)
+
+        # 两个列表的选中项跟随当前 Mod
+        self._sync_tree_selection()
 
         # Mod 大小 + 游戏版本核对（后台线程，避免卡界面）
         threading.Thread(target=self._bg_scan_mod, args=(d,), daemon=True).start()
@@ -1221,29 +1263,85 @@ class HOI4ModUploaderApp:
             add_item(cur, self.published_id.get())
 
         # 恢复选中
-        if sel_key:
-            for iid in tree.get_children():
-                if path_key(iid) == sel_key:
-                    tree.selection_set(iid)
-                    break
-        elif cur:
-            for iid in tree.get_children():
-                if path_key(iid) == path_key(cur):
-                    tree.selection_set(iid)
-                    break
+        self._sync_tree_selection()
 
     def _on_history_select(self, e=None):
         if not self._ui_ready:
             return
         sel = self.history_tree.selection()
-        if not sel:
+        if sel:
+            self._load_mod_dir(sel[0])
+
+    def _on_local_select(self, e=None):
+        if not self._ui_ready:
             return
-        d = sel[0]
+        sel = self.local_tree.selection()
+        if sel:
+            self._load_mod_dir(sel[0])
+
+    def _load_mod_dir(self, d):
         if path_key(d) == path_key(self.mod_dir.get()):
             return
         self.mod_dir.set(d)
         self._parse_mod(quiet=True)
-        self._log(f"[历史] 载入 Mod：{d}", "dim")
+        self._log(f"[载入] {d}", "dim")
+
+    def _sync_tree_selection(self):
+        """让两个列表的选中项跟随当前 Mod"""
+        cur = self.mod_dir.get().strip()
+        for tree in (self.history_tree, self.local_tree):
+            for iid in tree.get_children():
+                if cur and path_key(iid) == path_key(cur):
+                    if tree.selection() != (iid,):
+                        tree.selection_set(iid)
+                    tree.see(iid)
+                    break
+
+    # ---------------- 本地 Mod 扫描 ----------------
+    def _scan_local_mods(self):
+        """后台扫描 HOI4 本地 mod 目录，列出所有可上传的 Mod"""
+        def worker():
+            base = DEFAULT_HOI4_MOD_DIR
+            pids = {path_key(k): v for k, v in
+                    self._read_config_file().get("published_ids", {}).items()}
+            results = []
+            try:
+                entries = sorted(os.listdir(base), key=str.lower)
+            except OSError:
+                entries = []
+            for name in entries:
+                d = os.path.join(base, name)
+                if not os.path.isdir(d):
+                    continue
+                has_desc = os.path.isfile(os.path.join(d, "descriptor.mod"))
+                if not has_desc:
+                    try:
+                        has_desc = any(f.endswith(".mod") for f in os.listdir(d))
+                    except OSError:
+                        has_desc = False
+                if not has_desc:
+                    continue
+                info = parse_descriptor(d)
+                disp = info["name"] or name
+                results.append((d, disp, pids.get(path_key(d), "")))
+            try:
+                self.root.after(0, lambda: self._fill_local_tree(results, base))
+            except Exception:
+                pass
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _fill_local_tree(self, results, base):
+        items = self.local_tree.get_children()
+        if items:
+            self.local_tree.delete(*items)
+        if not results:
+            self.local_tree.insert("", "end", iid="_none_local",
+                                   text=f" 未找到 Mod\n {base}")
+        for d, name, pid in results:
+            suffix = f"已发布 ID {pid}" if str(pid) not in ("", "0") else "未上传"
+            self.local_tree.insert("", "end", iid=d, text=f" {name}\n {suffix}")
+        self._sync_tree_selection()
 
     def _remove_history(self):
         sel = self.history_tree.selection()
@@ -1266,6 +1364,7 @@ class HOI4ModUploaderApp:
         if path_key(key) == path_key(self.mod_dir.get()):
             self.published_id.set("0")
         self._refresh_history()
+        self._scan_local_mods()
         self._log(f"[历史] 已移除记录：{key}", "dim")
 
     # ==========================================================
@@ -1636,6 +1735,7 @@ class HOI4ModUploaderApp:
                     self.published_id.set(new_id)
                     self.save_all()
                     self._refresh_history()
+                    self._scan_local_mods()
                     self.status_var.set("上传成功 ✓  " + url)
                     if self.open_after.get():
                         try:
@@ -1908,7 +2008,7 @@ class HOI4ModUploaderApp:
     def _about(self):
         messagebox.showinfo(
             "关于",
-            "HOI4 Mod 创意工坊上传工具 v2.0\n\n"
+            "HOI4 Mod 创意工坊上传工具 v2.1\n\n"
             "绕过 Paradox 启动器，直接调用 SteamCMD 上传 Mod 到创意工坊。\n"
             "HOI4 AppID: 394360\n\n"
             "数据文件：\n"
