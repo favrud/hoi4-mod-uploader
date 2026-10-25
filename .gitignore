@@ -1,0 +1,18 @@
+# ==== 本机账号/登录数据 —— 绝不上传 ====
+uploader_config.json
+uploader_config.backup.json
+logs/
+dumps/
+upload_workshop.vdf
+*.dmp
+
+# ==== 旧版本备份与本机临时文件 ====
+hoi4_mod_uploader_v1_backup.py
+_*
+
+# ==== Python ====
+__pycache__/
+*.py[cod]
+
+# ==== 本机生成的封面产物（make_cover.py 可重新生成）====
+thumbnail.png
